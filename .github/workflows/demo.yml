@@ -63,6 +63,7 @@ jobs:
             - name: Output contents
               run: ls
     report:
+        needs: [build, deploy]
         if: success()
         runs-on: ubuntu-latest
         steps:
