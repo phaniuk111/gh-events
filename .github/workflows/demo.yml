@@ -62,3 +62,11 @@ jobs:
                
             - name: Output contents
               run: ls
+    report:
+        if: success()
+        runs-on: ubuntu-latest
+        steps:
+            - name: Output info 
+              run: |
+                echo "Some thing went wrong"
+                echo "${{ toJson(github) }}"
