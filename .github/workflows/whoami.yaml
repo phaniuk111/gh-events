@@ -1,0 +1,24 @@
+- name: Who is this token?
+  id: whoami
+  uses: actions/github-script@v7
+  with:
+    github-token: ${{ steps.secrets.outputs.technical_account_token }}
+    script: |
+      async function whoAmI() {
+        try {
+          const u = await github.rest.users.getAuthenticated();
+          console.log(`TYPE=User LOGIN=${u.data.login} ID=${u.data.id}`);
+          return { kind: 'user', name: u.data.login };
+        } catch (e1) {
+          try {
+            const a = await github.rest.apps.getAuthenticated();
+            console.log(`TYPE=App SLUG=${a.data.slug} ID=${a.data.id}`);
+            return { kind: 'app', name: a.data.slug };
+          } catch (e2) {
+            throw new Error(`Token not recognized as User or App. e1=${e1.status} e2=${e2.status}`);
+          }
+        }
+      }
+      const me = await whoAmI();
+      core.setOutput('actor_kind', me.kind);
+      core.setOutput('actor_name', me.name);
