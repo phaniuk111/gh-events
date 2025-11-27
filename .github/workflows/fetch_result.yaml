@@ -1,0 +1,92 @@
+- name: Copy Test Result
+  shell: bash
+  run: |
+    # --- Configuration & Setup ---
+    set -e
+    NAMESPACE="eod"
+    APP_LABEL="${{ inputs.deployment_name }}"
+    RETRIES=30
+    
+    # Note: If your pod has multiple containers, add '-c <container-name>' 
+    # to the kubectl logs and exec commands below.
+
+    echo "--- 1. Finding Valid Pod (Ignoring Terminating) ---"
+    
+    POD_NAME=""
+    for ((i=1; i<=RETRIES; i++)); do
+      # Fetch all pods matching label, sorted by creation time (oldest -> newest)
+      # We output "Name DeletionTimestamp".
+      # awk 'NF==1' strictly filters for lines with ONLY the name (active pods),
+      # effectively ignoring any line that has a timestamp (terminating pods).
+      CANDIDATE=$(kubectl get pods -n $NAMESPACE -l app=$APP_LABEL \
+        --sort-by=.metadata.creationTimestamp \
+        -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.deletionTimestamp}{"\n"}{end}' | \
+        awk 'NF==1 {print $1}' | tail -1)
+
+      if [[ -n "$CANDIDATE" ]]; then
+        POD_NAME=$CANDIDATE
+        echo "Found active Pod: $POD_NAME"
+        break
+      fi
+      
+      echo "Waiting for pod creation... ($i/$RETRIES)"
+      sleep 5
+    done
+
+    if [[ -z "$POD_NAME" ]]; then
+      echo "Error: Could not find a non-terminating pod after retries."
+      exit 1
+    fi
+
+    echo "--- 2. Waiting for Pod Ready ---"
+    # Wait for the pod to reach Running state (timeout 300s)
+    kubectl wait --for=jsonpath='{.status.phase}'=Running pod/$POD_NAME -n $NAMESPACE --timeout=300s
+
+    echo "--- 3. Monitoring Logs for Completion ---"
+    
+    FOUND_SUCCESS=false
+    MAX_LOG_WAIT=120 # 120 * 5s = 10 minutes
+    
+    for ((j=1; j<=MAX_LOG_WAIT; j++)); do
+      # Poll logs using --since=10s to avoid SIGPIPE issues and reduce load
+      if kubectl logs -n $NAMESPACE $POD_NAME --since=10s 2>/dev/null | grep -q "Test Completed"; then
+        echo "Success: 'Test Completed' found in logs."
+        FOUND_SUCCESS=true
+        break
+      fi
+      
+      if (( j % 6 == 0 )); then echo "Still testing... ($j/$MAX_LOG_WAIT intervals)"; fi
+      sleep 5
+    done
+
+    if [ "$FOUND_SUCCESS" = false ]; then
+       echo "Error: Timed out waiting for 'Test Completed'."
+       # Dump recent logs for debugging before failing
+       echo "--- Last 20 lines of logs ---"
+       kubectl logs -n $NAMESPACE $POD_NAME --tail=20
+       exit 1
+    fi
+
+    echo "--- 4. Retrieving Files ---"
+    
+    # Clear/Create output file
+    > eod-report.log
+
+    # Use 'exec cat' to avoid 'tar' dependency required by 'kubectl cp'
+    echo "Retrieving results.jtl..."
+    if kubectl exec -n $NAMESPACE $POD_NAME -- cat /home/nonroot/result/results.jtl >> eod-report.log 2>/dev/null; then
+        echo "Success: results.jtl appended."
+    else
+        echo "Warning: results.jtl not found or could not be read."
+    fi
+
+    echo "Retrieving console.log..."
+    if kubectl exec -n $NAMESPACE $POD_NAME -- cat /home/nonroot/console.log >> eod-report.log 2>/dev/null; then
+        echo "Success: console.log appended."
+    else 
+        echo "Warning: console.log not found or could not be read."
+    fi
+
+    echo "--- 5. Done ---"
+    echo "Report generated: eod-report.log"
+    echo "Report stats: $(wc -l < eod-report.log) lines, $(du -h eod-report.log | cut -f1)"
