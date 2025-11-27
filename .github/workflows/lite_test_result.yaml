@@ -1,0 +1,35 @@
+- name: Copy Test Result
+  shell: bash
+  run: |
+    set -e
+    NAMESPACE="eod"
+    APP_LABEL="${{ inputs.deployment_name }}"
+    
+    echo "--- 1. Waiting for Pod ---"
+    # Simple wait (assumes no old pods exist)
+    kubectl wait --for=condition=Ready pod -l app=$APP_LABEL -n $NAMESPACE --timeout=300s
+
+    # Get Pod Name (taking the first one found)
+    POD_NAME=$(kubectl get pod -n $NAMESPACE -l app=$APP_LABEL -o jsonpath="{.items[0].metadata.name}")
+    echo "Attached to: $POD_NAME"
+
+    echo "--- 2. Streaming Logs ---"
+    
+    # We allow the pipe to break (|| true) so the script doesn't crash on SIGPIPE.
+    # We verify the result explicitly in the next step.
+    timeout 600s kubectl logs -f -n $NAMESPACE $POD_NAME | { grep -m 1 "Test Completed" || true; }
+
+    # Verification: Did we actually finish, or did we timeout?
+    if ! kubectl logs -n $NAMESPACE $POD_NAME --tail=100 | grep -q "Test Completed"; then
+      echo "Error: 'Test Completed' not found (Timed out or Pod failed)"
+      exit 1
+    fi
+
+    echo "--- 3. Retrieving Files ---"
+    
+    > eod-report.log
+    # Using 'exec cat' for safety (no tar required)
+    kubectl exec -n $NAMESPACE $POD_NAME -- cat /home/nonroot/result/results.jtl >> eod-report.log 2>/dev/null || echo "Warning: results.jtl missing"
+    kubectl exec -n $NAMESPACE $POD_NAME -- cat /home/nonroot/console.log >> eod-report.log 2>/dev/null || echo "Warning: console.log missing"
+
+    echo "Done. Report size: $(du -h eod-report.log | cut -f1)"
