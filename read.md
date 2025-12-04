@@ -81,6 +81,127 @@ resource.type="dataflow_step" AND labels."env"="uat1"
 
 ---
 
+## BigQuery Setup (Common to All Options)
+
+Separate datasets per environment for complete data isolation. Same table schemas, different datasets.
+
+### Dataset Structure
+
+| Component | UAT1 (Ongoing) | UAT2 (Frozen) |
+|-----------|----------------|---------------|
+| **Dataset** | `dataset_uat1` | `dataset_uat2` |
+| **Location** | `europe-west2` | `europe-west2` |
+| **Tables** | `orders`, `transactions`, `audit_log` | `orders`, `transactions`, `audit_log` |
+| **Labels** | `env=uat1, team=eod` | `env=uat2, team=eod` |
+
+### Table Schema (Same for Both)
+
+```sql
+-- dataset_uat1.orders / dataset_uat2.orders
+CREATE TABLE dataset_uat1.orders (
+    order_id STRING NOT NULL,
+    customer_id STRING,
+    amount NUMERIC(15,2),
+    status STRING,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    processed_by_job STRING,  -- Dataflow job name for traceability
+    ingestion_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+)
+PARTITION BY DATE(created_at)
+CLUSTER BY customer_id, status;
+```
+
+### Terraform for BigQuery Datasets
+
+```hcl
+# Create datasets for each environment
+resource "google_bigquery_dataset" "eod_dataset" {
+  for_each = toset(["uat1", "uat2", "sit", "prd"])
+
+  dataset_id    = "dataset_${each.key}"
+  friendly_name = "EOD Dataset - ${upper(each.key)}"
+  description   = "EOD data for ${each.key} environment"
+  location      = "europe-west2"
+
+  labels = {
+    env  = each.key
+    team = "eod"
+  }
+
+  # Optional: Set default table expiration for non-prod
+  default_table_expiration_ms = each.key == "prd" ? null : 7776000000  # 90 days for non-prod
+}
+
+# Create tables in each dataset
+resource "google_bigquery_table" "orders" {
+  for_each = toset(["uat1", "uat2", "sit", "prd"])
+
+  dataset_id = google_bigquery_dataset.eod_dataset[each.key].dataset_id
+  table_id   = "orders"
+
+  time_partitioning {
+    type  = "DAY"
+    field = "created_at"
+  }
+
+  clustering = ["customer_id", "status"]
+
+  labels = {
+    env = each.key
+  }
+
+  schema = file("schemas/orders.json")
+}
+```
+
+### IAM Access Control
+
+```hcl
+# Dataflow service account needs write access
+resource "google_bigquery_dataset_iam_member" "dataflow_writer" {
+  for_each = toset(["uat1", "uat2"])
+
+  dataset_id = google_bigquery_dataset.eod_dataset[each.key].dataset_id
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:dataflow-sa@project.iam.gserviceaccount.com"
+}
+
+# Read access for analysts
+resource "google_bigquery_dataset_iam_member" "analyst_reader" {
+  for_each = toset(["uat1", "uat2"])
+
+  dataset_id = google_bigquery_dataset.eod_dataset[each.key].dataset_id
+  role       = "roles/bigquery.dataViewer"
+  member     = "group:analysts@example.com"
+}
+```
+
+### Log Filtering for BigQuery
+
+```
+# Query logs for uat1 dataset
+resource.type="bigquery_resource"
+protoPayload.serviceData.jobCompletedEvent.job.jobConfiguration.query.destinationTable.datasetId="dataset_uat1"
+
+# Data access logs
+resource.type="bigquery_resource"
+protoPayload.resourceName=~"projects/.*/datasets/dataset_uat1/.*"
+```
+
+### Data Cleanup (Optional)
+
+```sql
+-- Delete old data from uat1 (older than 90 days)
+DELETE FROM dataset_uat1.orders
+WHERE created_at < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY);
+
+-- Truncate uat2 for fresh release testing
+TRUNCATE TABLE dataset_uat2.orders;
+```
+
+---
+
 ## Option 1: Parameterised Single DAG
 
 Spring Boot in each namespace triggers the **SAME DAG** but passes different environment parameter via REST API conf. DAG uses parameter to configure Dataflow job.
@@ -186,6 +307,10 @@ labels."workflow"="eod_pipeline_uat1"
 # Dataflow logs
 resource.type="dataflow_step"
 resource.labels.job_name=~"eod-uat1-.*"
+
+# BigQuery logs
+resource.type="bigquery_resource"
+protoPayload.resourceName=~"projects/.*/datasets/dataset_uat1/.*"
 ```
 
 ---
@@ -229,6 +354,30 @@ Both GKE namespaces trigger same DAG, Dataflow writes to same table with env col
 | **Dataflow Output** | `dataset_uat.orders (env=uat1)` | `dataset_uat.orders (env=uat2)` |
 | **BigQuery Access** | `orders_uat1` (VIEW) | `orders_uat2` (VIEW) |
 
+### BigQuery Table with Environment Column
+
+```sql
+-- Shared table with env column
+CREATE TABLE dataset_uat.orders (
+    order_id STRING NOT NULL,
+    customer_id STRING,
+    amount NUMERIC(15,2),
+    status STRING,
+    env STRING NOT NULL,  -- 'uat1' or 'uat2'
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+)
+PARTITION BY DATE(created_at)
+CLUSTER BY env, customer_id;
+
+-- Views for isolation
+CREATE VIEW dataset_uat.orders_uat1 AS
+SELECT * FROM dataset_uat.orders WHERE env = 'uat1';
+
+CREATE VIEW dataset_uat.orders_uat2 AS
+SELECT * FROM dataset_uat.orders WHERE env = 'uat2';
+```
+
 ✅ **Pros:** Simplest infrastructure, single pipeline
 
 ❌ **Cons:** Data mixed in same table, no DAG-level freeze, Dataflow jobs still mixed, harder to delete env data
@@ -247,6 +396,7 @@ Both GKE namespaces trigger same DAG, Dataflow writes to same table with env col
 | **Freeze UAT2** | ⚠️ Lock image | ✅ Pause DAG | ✅ Freeze env | 🔴 No control |
 | **Log Filtering** | ⚠️ Search msg | ✅ By workflow | ✅ By env | ⚠️ Search msg |
 | **Run History** | ⚠️ Mixed | ✅ Separate | ✅ Separate | ⚠️ Mixed |
+| **Data Cleanup** | ✅ Drop dataset | ✅ Drop dataset | ✅ Drop dataset | ⚠️ Delete where |
 
 ---
 
@@ -283,6 +433,7 @@ Both GKE namespaces trigger same DAG, Dataflow writes to same table with env col
 - [ ] Create `eod_pipeline_uat1` DAG
 - [ ] Create `eod_pipeline_uat2` DAG
 - [ ] Or use factory pattern to generate both
+- [ ] Configure DAG tags for filtering
 
 ### Dataflow
 - [ ] No new Flex Template needed (shared)
@@ -290,14 +441,59 @@ Both GKE namespaces trigger same DAG, Dataflow writes to same table with env col
 - [ ] Add labels: `env=uat1`, `env=uat2`
 
 ### BigQuery
-- [ ] Create `dataset_uat1`
-- [ ] Create `dataset_uat2`
+- [ ] Create `dataset_uat1` dataset
+- [ ] Create `dataset_uat2` dataset
+- [ ] Create tables: `orders`, `transactions`, `audit_log`
+- [ ] Add labels: `env=uat1`, `env=uat2`
+- [ ] Configure IAM for Dataflow service account (dataEditor)
+- [ ] Configure IAM for analysts (dataViewer)
+- [ ] Set table expiration policy (optional, for non-prod)
 
 ### GCS
 - [ ] Create `gs://data-uat1` bucket
 - [ ] Create `gs://data-uat2` bucket
 - [ ] Create `gs://dataflow-temp-uat1` bucket
 - [ ] Create `gs://dataflow-temp-uat2` bucket
+- [ ] Add labels for cost tracking
+
+### Monitoring & Logging
+- [ ] Create Cloud Logging saved queries for each environment
+- [ ] Create Cloud Monitoring dashboard with environment filter
+- [ ] Set up alerts per environment (optional)
+
+---
+
+## Cloud Logging Queries
+
+### Full Pipeline Logs (UAT1)
+
+```
+(
+  (resource.type="k8s_container" AND resource.labels.namespace_name="uat1")
+  OR
+  (resource.type="cloud_composer_environment" AND labels."workflow"="eod_pipeline_uat1")
+  OR
+  (resource.type="dataflow_step" AND resource.labels.job_name=~"eod-uat1-.*")
+  OR
+  (resource.type="bigquery_resource" AND protoPayload.resourceName=~"projects/.*/datasets/dataset_uat1/.*")
+)
+severity>=INFO
+```
+
+### Full Pipeline Logs (UAT2)
+
+```
+(
+  (resource.type="k8s_container" AND resource.labels.namespace_name="uat2")
+  OR
+  (resource.type="cloud_composer_environment" AND labels."workflow"="eod_pipeline_uat2")
+  OR
+  (resource.type="dataflow_step" AND resource.labels.job_name=~"eod-uat2-.*")
+  OR
+  (resource.type="bigquery_resource" AND protoPayload.resourceName=~"projects/.*/datasets/dataset_uat2/.*")
+)
+severity>=INFO
+```
 
 ---
 
@@ -321,6 +517,17 @@ If migrating from REST API to Pub/Sub:
 ┌─────────────────┐     ┌─────────────────┐
 │eod_pipeline_uat1│     │eod_pipeline_uat2│
 │(DAG with sensor)│     │(DAG with sensor)│
+└────────┬────────┘     └────────┬────────┘
+         │                       │
+         ▼                       ▼
+┌─────────────────┐     ┌─────────────────┐
+│  Dataflow       │     │  Dataflow       │
+│  eod-uat1-*     │     │  eod-uat2-*     │
+└────────┬────────┘     └────────┬────────┘
+         │                       │
+         ▼                       ▼
+┌─────────────────┐     ┌─────────────────┐
+│  dataset_uat1   │     │  dataset_uat2   │
 └─────────────────┘     └─────────────────┘
 ```
 
