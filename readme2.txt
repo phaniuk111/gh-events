@@ -361,6 +361,18 @@ h2. Adding New Environment (e.g., DEV3 or UAT3)
 
 ----
 
+
+h2. Logging & Observability
+
+h3. How to Filter Logs by Environment
+
+||Component||Filter Method||Example Query / Filter||
+|*GKE Pods*|By namespace|{{resource.labels.namespace_name="uat1"}}|
+|*Dataflow Jobs*|By job name prefix or labels|{{resource.labels.job_name=~"eod-uat1-.*"}} or {{labels.env="uat1"}}|
+|*Composer DAGs*|By DAG name|{{labels.workflow="eod_pipeline_uat1"}}|
+|*BigQuery*|By dataset name|Query {{dataset_uat1.table_name}}|
+|*GCS*|By bucket name|{{gs://data-uat1/*}}|
+----
 h2. Benefits Summary
 
 ||Benefit||How It's Achieved||
