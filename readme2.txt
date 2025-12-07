@@ -55,7 +55,16 @@ h3. Current Flow
 
 ----
 
-h2. Proposed Solution: PR Label Based Deployment
+h2. Proposed Solution: Three Pillars
+
+||Pillar||What||Why||
+|*1. Multiple Namespaces*|dev1, dev2, uat1, uat2 namespaces|Isolation without infrastructure duplication|
+|*2. Override Files*|environments/dev1/values.yaml, environments/uat1/values.yaml, etc.|Environment-specific configuration|
+|*3. Feature Flags*|Config-driven flags in Spring Profiles|Control behavior per environment (suppress emails, mock payments, etc.)|
+
+----
+
+h2. Implementation: PR Label Based Deployment
 
 h3. What Changes
 
@@ -65,13 +74,6 @@ h3. What Changes
 |eod-app-deployment (uat)|Single UAT deployment|*PR label determines target namespace (uat1 or uat2)*|
 |eod-app-deployment (prl1)|No change|No change|
 |eod-app-deployment (prd)|No change|No change|
-
-h3. Three Pillars of the Solution
-
-||Pillar||What||Why||
-|*1. Multiple Namespaces*|dev1, dev2, uat1, uat2 namespaces|Isolation without infrastructure duplication|
-|*2. Override Files*|environments/dev1/values.yaml, environments/uat1/values.yaml, etc.|Environment-specific configuration|
-|*3. Feature Flags*|Config-driven flags in Spring Profiles|Control behavior per environment (suppress emails, mock payments, etc.)|
 
 ----
 
