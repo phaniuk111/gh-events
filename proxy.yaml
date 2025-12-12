@@ -1,0 +1,41 @@
+{{- if .Values.proxy.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "payment-service.fullname" . }}-proxy-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "payment-service.labels" . | nindent 4 }}
+data:
+  HTTP_PROXY: {{ .Values.proxy.http | quote }}
+  HTTPS_PROXY: {{ .Values.proxy.https | quote }}
+  http_proxy: {{ .Values.proxy.http | quote }}
+  https_proxy: {{ .Values.proxy.https | quote }}
+  NO_PROXY: {{ .Values.proxy.noProxy | quote }}
+  no_proxy: {{ .Values.proxy.noProxy | quote }}
+{{- end }}
+---
+# templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.serviceName }}
+spec:
+  template:
+    spec:
+      containers:
+      - name: {{ .Values.serviceName }}
+        image: {{ .Values.image }}
+        envFrom:
+        - configMapRef:
+            name: proxy-config  # References namespace-level ConfigMap
+        env:
+        # Additional service-specific envs
+        - name: SPRING_PROFILES_ACTIVE
+          value: {{ .Values.springProfile }}
+---
+proxy:
+  enabled: true
+  http: "http://proxy.internal:8080"
+  https: "http://proxy.internal:8080"
+  noProxy: ".googleapis.com,.googleusercontent.com,storage.googleapis.com,bigquery.googleapis.com,composer.googleapis.com,metadata.google.internal,169.254.169.254,10.0.0.0/8,.svc.cluster.local,localhost,127.0.0.1"
