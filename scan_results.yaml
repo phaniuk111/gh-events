@@ -1,0 +1,130 @@
+name: Dynamic SDLC Controls
+
+on:
+  # TRIGGER 1: Manual Run (with optional overrides)
+  workflow_dispatch:
+    inputs:
+      service_list:
+        description: 'Service List (Leave empty to use .github/release/services.json)'
+        required: false
+        type: string
+        default: ''
+      run_hcc:
+        description: 'Run No Hard Coded Credentials?'
+        type: boolean
+        default: true
+  
+  # TRIGGER 2: Automatic Run (only when the JSON file changes)
+  push:
+    branches:
+      - main  # Or master, dev, etc.
+    paths:
+      - '.github/release/services.json'
+
+jobs:
+  # ------------------------------------------------------------------
+  # JOB 1: Determine Input Source and Generate Matrix
+  # ------------------------------------------------------------------
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generator.outputs.result }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Generate Matrix
+        id: generator
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            // 1. Safely get UI input (handle cases where trigger is 'push' and inputs are undefined)
+            const inputs = context.payload.inputs || {};
+            const uiInput = inputs.service_list || "";
+            
+            let matrix = [];
+
+            // ---------------------------------------------------------
+            // SCENARIO A: Manual Trigger with Input (High Priority)
+            // ---------------------------------------------------------
+            if (uiInput && uiInput.trim() !== "") {
+              console.log("Trigger: Manual override detected.");
+              console.log("Input:", uiInput);
+              
+              const items = uiInput.split(',');
+              
+              matrix = items.map(item => {
+                const cleanItem = item.trim();
+                if (!cleanItem) return null;
+                
+                const parts = cleanItem.split(':');
+                if (parts[0].trim() === "") return null;
+
+                return {
+                  name: parts[0].trim(),
+                  version: parts[1] ? parts[1].trim() : "latest"
+                };
+              }).filter(Boolean);
+
+            // ---------------------------------------------------------
+            // SCENARIO B: Automatic Trigger (Push) OR Manual with empty input
+            // ---------------------------------------------------------
+            } else {
+              const filePath = '.github/release/services.json';
+              console.log(`Trigger: File based (Push event or Empty Input).`);
+              console.log(`Reading from: ${filePath}`);
+              
+              if (fs.existsSync(filePath)) {
+                const fileContent = fs.readFileSync(filePath, 'utf8');
+                try {
+                  matrix = JSON.parse(fileContent);
+                  console.log("Successfully loaded configuration from file.");
+                } catch (e) {
+                  core.setFailed(`Failed to parse JSON file: ${e.message}`);
+                  return;
+                }
+              } else {
+                core.setFailed(`File ${filePath} not found and no UI input provided.`);
+                return;
+              }
+            }
+
+            // ---------------------------------------------------------
+            // Output Result
+            // ---------------------------------------------------------
+            console.log("Final Matrix:", JSON.stringify(matrix));
+            return matrix;
+
+  # ------------------------------------------------------------------
+  # JOB 2: Run SDLC Workflow
+  # ------------------------------------------------------------------
+  call_sdlc_controls_wf1:
+    needs: prepare-matrix
+    if: ${{ needs.prepare-matrix.outputs.matrix != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+        
+    uses: .github/workflows/sdlc_development_workflow.yml@main
+    with:
+      # --- Inputs ---
+      # Note: inputs.run_hcc might be empty on a 'push' event, so we default to true
+      NO_HARD_CODED_CREDENTIALS: ${{ inputs.run_hcc || true }}
+      
+      TEST_EVALUATION_REPORT: true
+      SOURCE_CODE_REVIEW: true
+      BUSINESS_REQUIREMENTS: true
+      TEST_CASES_TRACEABILITY: true
+      BINARY_TRACEABILITY: true
+      
+      # --- Dynamic Values from Matrix ---
+      SERVICE_NAME: ${{ matrix.name }}
+      SERVICE_VERSION: ${{ matrix.version }}
+      
+      UNIT_TEST_REPORT_ATTACHMENT: test-reports
+      UNIT_TEST_REPORT_NAME: /test/index.html
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      RELEASE_BRANCH: main
